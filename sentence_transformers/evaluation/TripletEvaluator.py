@@ -5,6 +5,8 @@ import csv
 from sklearn.metrics.pairwise import paired_cosine_distances, paired_euclidean_distances, paired_manhattan_distances
 from typing import List
 from ..readers import InputExample
+from torch.nn import functional as F
+import torch
 
 
 logger = logging.getLogger(__name__)
@@ -54,8 +56,8 @@ class TripletEvaluator(SentenceEvaluator):
             )
         self.show_progress_bar = show_progress_bar
 
-        self.csv_file: str = "triplet_evaluation" + ("_" + name if name else "") + "_results.csv"
-        self.csv_headers = ["epoch", "steps", "accuracy_cosinus", "accuracy_manhattan", "accuracy_euclidean"]
+        self.csv_file: str = (name if name else "validation") + "_results.csv"
+        self.csv_headers = ["epoch", "steps", "accuracy_cosine", "accuracy_manhattan", "accuracy_euclidean", "loss"]
         self.write_csv = write_csv
 
     @classmethod
@@ -122,9 +124,14 @@ class TripletEvaluator(SentenceEvaluator):
         accuracy_manhattan = num_correct_manhattan_triplets / num_triplets
         accuracy_euclidean = num_correct_euclidean_triplets / num_triplets
 
+        # Get TripletLoss
+        triplet_margin = 5.0
+        losses = F.relu(torch.tensor(pos_euclidean_distance) - torch.tensor(neg_euclidean_distances) + triplet_margin)
+        triplet_loss = losses.mean().item()
+        print("Valid Loss = {:.2f}   Valid Accuracy = {:.2f}".format(triplet_loss, accuracy_euclidean*100))
         logger.info("Accuracy Cosine Distance:   \t{:.2f}".format(accuracy_cos * 100))
         logger.info("Accuracy Manhattan Distance:\t{:.2f}".format(accuracy_manhattan * 100))
-        logger.info("Accuracy Euclidean Distance:\t{:.2f}\n".format(accuracy_euclidean * 100))
+        logger.info("Accuracy Euclidean Distance:\t{:.2f}".format(accuracy_euclidean * 100))
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
@@ -132,12 +139,12 @@ class TripletEvaluator(SentenceEvaluator):
                 with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, accuracy_cos, accuracy_manhattan, accuracy_euclidean])
+                    writer.writerow([epoch, steps, accuracy_cos, accuracy_manhattan, accuracy_euclidean, triplet_loss])
 
             else:
                 with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, steps, accuracy_cos, accuracy_manhattan, accuracy_euclidean])
+                    writer.writerow([epoch, steps, accuracy_cos, accuracy_manhattan, accuracy_euclidean, triplet_loss])
 
         if self.main_distance_function == SimilarityFunction.COSINE:
             return accuracy_cos

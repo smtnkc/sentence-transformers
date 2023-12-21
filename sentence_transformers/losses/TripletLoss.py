@@ -65,4 +65,15 @@ class TripletLoss(nn.Module):
         distance_neg = self.distance_metric(rep_anchor, rep_neg)
 
         losses = F.relu(distance_pos - distance_neg + self.triplet_margin)
-        return losses.mean()
+
+        # Accuracy
+        num_triplets = num_correct_cos_triplets = 0
+        for idx in range(len(distance_pos)):
+            num_triplets += 1
+
+            if distance_pos[idx] < distance_neg[idx]:
+                num_correct_cos_triplets += 1
+
+        accuracy = num_correct_cos_triplets / num_triplets
+
+        return losses.mean(), accuracy

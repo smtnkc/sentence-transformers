@@ -111,8 +111,8 @@ class Transformer(nn.Module):
                 batch2.append(text_tuple[1])
             to_tokenize = [batch1, batch2]
 
-        #strip
-        to_tokenize = [[str(s).strip() for s in col] for col in to_tokenize]
+        #strip -> Comment out for covsnn model
+        #to_tokenize = [[str(s).strip() for s in col] for col in to_tokenize]
 
         #Lowercase
         if self.do_lower_case:

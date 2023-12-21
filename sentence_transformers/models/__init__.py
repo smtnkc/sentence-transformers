@@ -5,6 +5,7 @@ from .CNN import CNN
 from .Dense import Dense
 from .Dropout import Dropout
 from .LayerNorm import LayerNorm
+from .Linear import Linear
 from .LSTM import LSTM
 from .Normalize import Normalize
 from .Pooling import Pooling

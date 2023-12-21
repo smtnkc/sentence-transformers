@@ -26,7 +26,7 @@ class Pooling(nn.Module):
                  pooling_mode: str = None,
                  pooling_mode_cls_token: bool = False,
                  pooling_mode_max_tokens: bool = False,
-                 pooling_mode_mean_tokens: bool = True,
+                 pooling_mode_mean_tokens: bool = False,
                  pooling_mode_mean_sqrt_len_tokens: bool = False,
                  pooling_mode_weightedmean_tokens: bool = False,
                  pooling_mode_lasttoken: bool = False,

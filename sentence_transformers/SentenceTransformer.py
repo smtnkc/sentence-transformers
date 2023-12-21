@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from tqdm.autonotebook import trange
 import math
+import csv
 import queue
 import tempfile
 from distutils.dir_util import copy_tree
@@ -591,7 +592,8 @@ class SentenceTransformer(nn.Sequential):
             show_progress_bar: bool = True,
             checkpoint_path: str = None,
             checkpoint_save_steps: int = 500,
-            checkpoint_save_total_limit: int = 0
+            checkpoint_save_total_limit: int = 0,
+            loss_name: str = "ContrastiveLoss",
             ):
         """
         Train the model with the given training objective
@@ -680,69 +682,98 @@ class SentenceTransformer(nn.Sequential):
         data_iterators = [iter(dataloader) for dataloader in dataloaders]
 
         num_train_objectives = len(train_objectives)
-
+        self.csv_file: str = "training_results.csv"
+        self.csv_headers = ["epoch",  "accuracy_euclidean", "loss"]
         skip_scheduler = False
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
             training_steps = 0
+            total_loss_value = 0
+            total_accuracy = 0
 
             for loss_model in loss_models:
                 loss_model.zero_grad()
                 loss_model.train()
 
-            for _ in trange(steps_per_epoch, desc="Iteration", smoothing=0.05, disable=not show_progress_bar):
-                for train_idx in range(num_train_objectives):
-                    loss_model = loss_models[train_idx]
-                    optimizer = optimizers[train_idx]
-                    scheduler = schedulers[train_idx]
-                    data_iterator = data_iterators[train_idx]
+            with trange(steps_per_epoch, desc="Iteration", smoothing=0.05, disable=not show_progress_bar) as itereation_tqdm: 
+                for _ in itereation_tqdm:
+                    for train_idx in range(num_train_objectives):
+                        loss_model = loss_models[train_idx]
+                        optimizer = optimizers[train_idx]
+                        scheduler = schedulers[train_idx]
+                        data_iterator = data_iterators[train_idx]
 
-                    try:
-                        data = next(data_iterator)
-                    except StopIteration:
-                        data_iterator = iter(dataloaders[train_idx])
-                        data_iterators[train_idx] = data_iterator
-                        data = next(data_iterator)
+                        try:
+                            data = next(data_iterator)
+                            #print(data[0][0]['input_ids'].shape)
+                            #print(data[0][0]['input_ids'][0])
+                        except StopIteration:
+                            data_iterator = iter(dataloaders[train_idx])
+                            data_iterators[train_idx] = data_iterator
+                            data = next(data_iterator)
 
-                    features, labels = data
-                    labels = labels.to(self._target_device)
-                    features = list(map(lambda batch: batch_to_device(batch, self._target_device), features))
+                        features, labels = data
+                        labels = labels.to(self._target_device)
+                        features = list(map(lambda batch: batch_to_device(batch, self._target_device), features))
 
-                    if use_amp:
-                        with autocast():
-                            loss_value = loss_model(features, labels)
+                        if use_amp:
+                            with autocast():
+                                loss_value, accuracy = loss_model(features, labels)
 
-                        scale_before_step = scaler.get_scale()
-                        scaler.scale(loss_value).backward()
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
-                        scaler.step(optimizer)
-                        scaler.update()
+                            scale_before_step = scaler.get_scale()
+                            scaler.scale(loss_value).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
+                            scaler.step(optimizer)
+                            scaler.update()
 
-                        skip_scheduler = scaler.get_scale() != scale_before_step
-                    else:
-                        loss_value = loss_model(features, labels)
-                        loss_value.backward()
-                        torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
-                        optimizer.step()
+                            skip_scheduler = scaler.get_scale() != scale_before_step
+                        else:
+                            loss_value, accuracy = loss_model(features, labels)
+                            loss_value.backward()
+                            torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
+                            optimizer.step()
 
-                    optimizer.zero_grad()
+                        #total_accuracy += accuracy
+                        #total_loss_value += loss_value.item()
+                        optimizer.zero_grad()
 
-                    if not skip_scheduler:
-                        scheduler.step()
+                        if not skip_scheduler:
+                            scheduler.step()
 
-                training_steps += 1
-                global_step += 1
+                    training_steps += 1
+                    global_step += 1
 
-                if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
-                    self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
+                    # Display loss value within the progress bar
+                    itereation_tqdm.set_postfix({"Loss": loss_value.item()})
 
-                    for loss_model in loss_models:
-                        loss_model.zero_grad()
-                        loss_model.train()
+                    if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
+                        self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
 
-                if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
-                    self._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
+                        for loss_model in loss_models:
+                            loss_model.zero_grad()
+                            loss_model.train()
 
+                    if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
+                        self._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
+
+            #epoch_loss = total_loss_value / training_steps
+            #epoch_accuracy = total_accuracy / training_steps
+            print("--- Epoch {} ---".format(epoch))
+            print("Train Loss = {:.2f}   Train Accuracy = {:.2f}".format(loss_value.item(), accuracy*100))
+
+            # write loss value to csv file
+            if output_path is not None:
+                csv_path = os.path.join(output_path, "eval", self.csv_file)
+                if not os.path.isfile(csv_path):
+                    with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(self.csv_headers)
+                        writer.writerow([epoch, accuracy, loss_value.item()])
+
+                else:
+                    with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([epoch, accuracy, loss_value.item()])
 
             self._eval_during_training(evaluator, output_path, save_best_model, epoch, -1, callback)
 

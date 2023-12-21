@@ -63,7 +63,7 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
             correct += torch.argmax(prediction, dim=1).eq(label_ids).sum().item()
         accuracy = correct/total
 
-        logger.info("Accuracy: {:.4f} ({}/{})\n".format(accuracy, correct, total))
+        print("Accuracy: {:.4f} ({}/{})\n".format(accuracy, correct, total))
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
