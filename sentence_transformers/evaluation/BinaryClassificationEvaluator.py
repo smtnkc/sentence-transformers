@@ -55,7 +55,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
         #                     "manhattan_accuracy", "manhattan_accuracy_threshold", "manhattan_f1", "manhattan_precision", "manhattan_recall", "manhattan_f1_threshold", "manhattan_ap",
         #                     "euclidean_accuracy", "euclidean_accuracy_threshold", "euclidean_f1", "euclidean_precision", "euclidean_recall", "euclidean_f1_threshold", "euclidean_ap",
         #                     "dot_accuracy", "dot_accuracy_threshold", "dot_f1", "dot_precision", "dot_recall", "dot_f1_threshold", "dot_ap"]
-        self.csv_headers = ["epoch", "steps", "loss", "accuracy_euclidean"]
+        self.csv_headers = ["epoch", "steps", "loss", "accuracy"]
 
 
     @classmethod

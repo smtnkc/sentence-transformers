@@ -2,6 +2,7 @@ import torch
 from torch import nn, Tensor
 from typing import Union, Tuple, List, Iterable, Dict, Callable
 from ..SentenceTransformer import SentenceTransformer
+from sklearn.metrics import f1_score, accuracy_score
 import logging
 
 
@@ -54,7 +55,7 @@ class SoftmaxLoss(nn.Module):
             num_vectors_concatenated += 1
         if concatenation_sent_multiplication:
             num_vectors_concatenated += 1
-        logger.info("Softmax loss: #Vectors concatenated: {}".format(num_vectors_concatenated))
+        print("Softmax loss: #Vectors concatenated: {}".format(num_vectors_concatenated))
         self.classifier = nn.Linear(num_vectors_concatenated * sentence_embedding_dimension, num_labels)
         self.loss_fct = loss_fct
 
@@ -79,6 +80,8 @@ class SoftmaxLoss(nn.Module):
 
         if labels is not None:
             loss = self.loss_fct(output, labels.view(-1))
-            return loss
+            accuracy = accuracy_score(labels.cpu(), torch.argmax(output, 1).cpu())
+            f1 = f1_score(labels.cpu(), torch.argmax(output, 1).cpu(), average='weighted')
+            return loss, accuracy
         else:
             return reps, output

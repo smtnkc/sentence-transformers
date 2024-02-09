@@ -29,17 +29,15 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
         self.name = name
         self.softmax_model = softmax_model
 
-        if name:
-            name = "_"+name
-
         self.write_csv = write_csv
-        self.csv_file = "accuracy_evaluation"+name+"_results.csv"
-        self.csv_headers = ["epoch", "steps", "accuracy"]
+        self.csv_file: str = (name if name else "validation") + "_results.csv"
+        self.csv_headers = ["epoch", "steps", "loss", "accuracy"]
 
     def __call__(self, model, output_path: str = None, epoch: int = -1, steps: int = -1) -> float:
         model.eval()
         total = 0
         correct = 0
+        loss = 0
 
         if epoch != -1:
             if steps == -1:
@@ -59,11 +57,13 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
             with torch.no_grad():
                 _, prediction = self.softmax_model(features, labels=None)
 
+            loss += torch.nn.functional.cross_entropy(prediction, label_ids).item()
             total += prediction.size(0)
             correct += torch.argmax(prediction, dim=1).eq(label_ids).sum().item()
-        accuracy = correct/total
+        epoch_accuracy = round(correct/total, 4)
+        epoch_loss = round(loss/total, 4)
 
-        print("Accuracy: {:.4f} ({}/{})\n".format(accuracy, correct, total))
+        print("Valid Loss = {:.2f}   Valid Accuracy = {:.2f}".format(epoch_loss, epoch_accuracy*100))
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
@@ -71,10 +71,10 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
                 with open(csv_path, newline='', mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, accuracy])
+                    writer.writerow([epoch, steps, epoch_loss, epoch_accuracy])
             else:
                 with open(csv_path, newline='', mode="a", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, steps, accuracy])
+                    writer.writerow([epoch, steps, epoch_loss, epoch_accuracy])
 
-        return accuracy
+        return epoch_accuracy

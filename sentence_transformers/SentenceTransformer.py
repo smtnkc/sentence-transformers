@@ -683,7 +683,7 @@ class SentenceTransformer(nn.Sequential):
 
         num_train_objectives = len(train_objectives)
         self.csv_file: str = "training_results.csv"
-        self.csv_headers = ["epoch",  "accuracy_euclidean", "loss"]
+        self.csv_headers = ["epoch",  "accuracy", "loss"]
         skip_scheduler = False
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
             training_steps = 0
@@ -759,7 +759,7 @@ class SentenceTransformer(nn.Sequential):
             #epoch_loss = total_loss_value / training_steps
             #epoch_accuracy = total_accuracy / training_steps
             print("--- Epoch {} ---".format(epoch))
-            print("Train Loss = {:.2f}   Train Accuracy = {:.2f}".format(loss_value.item(), accuracy*100))
+            print("Train Loss = {:.4f}   Train Accuracy = {:.4f}".format(loss_value.item(), accuracy*100))
 
             # write loss value to csv file
             if output_path is not None:
