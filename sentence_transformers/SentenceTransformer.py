@@ -807,7 +807,7 @@ class SentenceTransformer(nn.Sequential):
             os.makedirs(eval_path, exist_ok=True)
 
         if evaluator is not None:
-            score = evaluator(self, output_path=eval_path, epoch=epoch, steps=steps)
+            score, preds_and_trues = evaluator(self, output_path=eval_path, epoch=epoch, steps=steps)
             if callback is not None:
                 callback(score, epoch, steps)
             if score > self.best_score:

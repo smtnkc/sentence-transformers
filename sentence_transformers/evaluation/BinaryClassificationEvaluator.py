@@ -82,7 +82,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
 
         logger.info("Binary Accuracy Evaluation of the model on " + self.name + " dataset" + out_txt)
 
-        scores = self.compute_metrices(model)
+        scores, preds_and_trues = self.compute_metrices(model)
         min_loss = min(scores[short_name]['loss'] for short_name in scores)
         max_acc = max(scores[short_name]['accuracy'] for short_name in scores)
 
@@ -99,7 +99,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
                     writer = csv.writer(f)
                     writer.writerow([epoch, steps, min_loss, max_acc])
 
-        return max_acc
+        return max_acc, preds_and_trues
 
 
     def compute_metrices(self, model):
@@ -147,6 +147,12 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
             t_labels = torch.tensor(labels)
             t_scores = torch.tensor(scores)
             valid_losses = 0.5 * (t_labels.float() * t_scores.pow(2) + (1 - t_labels).float() * F.relu(margin - t_scores).pow(2))
+
+            preds_and_trues = []
+            for i in range(len(t_labels)):
+                pred = 1 if t_scores[i] < acc_threshold else 0
+                preds_and_trues.append((pred, t_labels[i].item()))
+
             print("Valid Loss = {:.2f}   Valid Accuracy = {:.2f}".format(valid_losses.mean(), acc * 100))
 
 
@@ -163,7 +169,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
             }
 
 
-        return output_scores
+        return output_scores, preds_and_trues
 
 
 
@@ -192,6 +198,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
                 max_acc = acc
                 best_threshold = (rows[i][0] + rows[i+1][0]) / 2
 
+        print("Threshold for highest accuracy = {:.4f}".format(best_threshold))
         return max_acc, best_threshold
 
     @staticmethod

@@ -49,6 +49,7 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
 
         logger.info("Evaluation on the "+self.name+" dataset"+out_txt)
         self.dataloader.collate_fn = model.smart_batching_collate
+        self.softmax_model.to(model.device)
         for step, batch in enumerate(self.dataloader):
             features, label_ids = batch
             for idx in range(len(features)):
@@ -59,7 +60,24 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
 
             loss += torch.nn.functional.cross_entropy(prediction, label_ids).item()
             total += prediction.size(0)
-            correct += torch.argmax(prediction, dim=1).eq(label_ids).sum().item()
+            predicted_ids = torch.argmax(prediction, dim=1)
+            correct += predicted_ids.eq(label_ids).sum().item()
+
+            # write predictions and labels to csv
+            if self.name == "test" and output_path is not None and self.write_csv:
+                csv_path = os.path.join(output_path, self.name + "_preds.csv")
+                if not os.path.isfile(csv_path):
+                    with open(csv_path, newline='', mode="w", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["prediction", "label"])
+                        for i in range(len(label_ids)):
+                            writer.writerow([predicted_ids[i].item(), label_ids[i].item()])
+                else:
+                    with open(csv_path, newline='', mode="a", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        for i in range(len(label_ids)):
+                            writer.writerow([predicted_ids[i].item(), label_ids[i].item()])
+
         epoch_accuracy = round(correct/total, 4)
         epoch_loss = round(loss/total, 4)
 
