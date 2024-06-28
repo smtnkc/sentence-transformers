@@ -576,6 +576,8 @@ class SentenceTransformer(nn.Sequential):
     def fit(self,
             train_objectives: Iterable[Tuple[DataLoader, nn.Module]],
             evaluator: SentenceEvaluator = None,
+            tester: SentenceEvaluator = None,
+            zero_shot_tester: SentenceEvaluator = None,
             epochs: int = 1,
             steps_per_epoch = None,
             scheduler: str = 'WarmupLinear',
@@ -593,7 +595,7 @@ class SentenceTransformer(nn.Sequential):
             checkpoint_path: str = None,
             checkpoint_save_steps: int = 500,
             checkpoint_save_total_limit: int = 0,
-            loss_name: str = "ContrastiveLoss",
+            loss_name: str = None,
             ):
         """
         Train the model with the given training objective
@@ -631,7 +633,21 @@ class SentenceTransformer(nn.Sequential):
             info_loss_functions.extend(ModelCardTemplate.get_train_objective_info(dataloader, loss))
         info_loss_functions = "\n\n".join([text for text in info_loss_functions])
 
-        info_fit_parameters = json.dumps({"evaluator": fullname(evaluator), "epochs": epochs, "steps_per_epoch": steps_per_epoch, "scheduler": scheduler, "warmup_steps": warmup_steps, "optimizer_class": str(optimizer_class),  "optimizer_params": optimizer_params, "weight_decay": weight_decay, "evaluation_steps": evaluation_steps, "max_grad_norm": max_grad_norm }, indent=4, sort_keys=True)
+        info_fit_parameters = json.dumps({
+            "evaluator": fullname(evaluator),
+            "tester": fullname(tester),
+            "zero_shot_tester": fullname(zero_shot_tester),
+            "loss_name": loss_name,
+            "epochs": epochs,
+            "steps_per_epoch": steps_per_epoch,
+            "scheduler": scheduler,
+            "warmup_steps": warmup_steps,
+            "optimizer_class": str(optimizer_class), 
+            "optimizer_params": optimizer_params,
+            "weight_decay": weight_decay,
+            "evaluation_steps": evaluation_steps,
+            "max_grad_norm": max_grad_norm },
+            indent=4, sort_keys=True)
         self._model_card_text = None
         self._model_card_vars['{TRAINING_SECTION}'] = ModelCardTemplate.__TRAINING_SECTION__.replace("{LOSS_FUNCTIONS}", info_loss_functions).replace("{FIT_PARAMETERS}", info_fit_parameters)
 
@@ -682,8 +698,8 @@ class SentenceTransformer(nn.Sequential):
         data_iterators = [iter(dataloader) for dataloader in dataloaders]
 
         num_train_objectives = len(train_objectives)
-        self.csv_file: str = "training_results.csv"
-        self.csv_headers = ["epoch",  "accuracy", "loss"]
+        self.csv_file: str = "Train.csv"
+        self.csv_headers = ["epoch",  "steps", "loss", "accuracy"]
         skip_scheduler = False
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
             training_steps = 0
@@ -747,7 +763,7 @@ class SentenceTransformer(nn.Sequential):
                     itereation_tqdm.set_postfix({"Loss": loss_value.item()})
 
                     if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
-                        self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
+                        _ = self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback, name="Eval")
 
                         for loss_model in loss_models:
                             loss_model.zero_grad()
@@ -759,23 +775,34 @@ class SentenceTransformer(nn.Sequential):
             #epoch_loss = total_loss_value / training_steps
             #epoch_accuracy = total_accuracy / training_steps
             print("--- Epoch {} ---".format(epoch))
-            print("Train Loss = {:.4f}   Train Accuracy = {:.4f}".format(loss_value.item(), accuracy*100))
+            print(f"Train Loss = {loss_value.item():.4f}   Train Accuracy = {accuracy:.4f}")
 
             # write loss value to csv file
             if output_path is not None:
-                csv_path = os.path.join(output_path, "eval", self.csv_file)
+                csv_path = os.path.join(output_path, "stats", self.csv_file)
                 if not os.path.isfile(csv_path):
                     with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                         writer = csv.writer(f)
                         writer.writerow(self.csv_headers)
-                        writer.writerow([epoch, accuracy, loss_value.item()])
+                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}"])
 
                 else:
                     with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
                         writer = csv.writer(f)
-                        writer.writerow([epoch, accuracy, loss_value.item()])
+                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}"])
 
-            self._eval_during_training(evaluator, output_path, save_best_model, epoch, -1, callback)
+            eval_out = self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback, name="Eval")
+            _ = self._eval_during_training(tester, output_path, save_best_model, epoch, training_steps, callback, name="Test")
+            _ = self._eval_during_training(zero_shot_tester, output_path, save_best_model, epoch, training_steps, callback, name="Zero")
+
+            if isinstance(eval_out, tuple) and len(eval_out) > 2:
+                median_distance_threshold = eval_out[2]
+                if median_distance_threshold < 1e-4:
+                    print("Early stopping training as median_distance_threshold is below 1e-4")
+                    break
+            if accuracy < 1e-4:
+                print("Early stopping training as train_accuracy is below 1e-4")
+                break
 
         if evaluator is None and output_path is not None:   #No evaluator, but output path: save final model version
             self.save(output_path)
@@ -798,22 +825,32 @@ class SentenceTransformer(nn.Sequential):
             os.makedirs(output_path, exist_ok=True)
         return evaluator(self, output_path)
 
-    def _eval_during_training(self, evaluator, output_path, save_best_model, epoch, steps, callback):
+    def _eval_during_training(self, evaluator, output_path, save_best_model, epoch, steps, callback, name):
         """Runs evaluation during the training"""
-        eval_path = output_path
+        
         if output_path is not None:
             os.makedirs(output_path, exist_ok=True)
-            eval_path = os.path.join(output_path, "eval")
-            os.makedirs(eval_path, exist_ok=True)
+            stats_path = os.path.join(output_path, 'stats')
+            os.makedirs(stats_path, exist_ok=True)
 
         if evaluator is not None:
-            score, preds_and_trues = evaluator(self, output_path=eval_path, epoch=epoch, steps=steps)
+            eval_output = evaluator(self, output_path=stats_path, epoch=epoch, steps=steps)
+            # check if eval_output is a float or tuple
+            if isinstance(eval_output, tuple):
+                score = eval_output[0]
+            else:
+                score = eval_output
             if callback is not None:
                 callback(score, epoch, steps)
-            if score > self.best_score:
-                self.best_score = score
-                if save_best_model:
-                    self.save(output_path)
+            if name == "Eval":
+                if score > self.best_score:
+                    self.best_score = score
+                    if save_best_model:
+                        best_model_path = os.path.join(output_path, "best_model")
+                        if not os.path.exists(best_model_path):
+                            os.makedirs(best_model_path)
+                        self.save(best_model_path)
+        return eval_output
 
     def _save_checkpoint(self, checkpoint_path, checkpoint_save_total_limit, step):
         # Store new checkpoint

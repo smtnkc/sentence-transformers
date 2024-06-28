@@ -1,13 +1,19 @@
-from . import SentenceEvaluator
+import csv
+import logging
+import os
+from typing import TYPE_CHECKING, Dict
+
 import torch
 from torch.utils.data import DataLoader
-import logging
-from ..util import batch_to_device
-import os
-import csv
 
+from sentence_transformers.evaluation.SentenceEvaluator import SentenceEvaluator
+from sentence_transformers.util import batch_to_device
+
+if TYPE_CHECKING:
+    from sentence_transformers.SentenceTransformer import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+
 
 class LabelAccuracyEvaluator(SentenceEvaluator):
     """
@@ -18,26 +24,34 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader: DataLoader, name: str = "", softmax_model = None, write_csv: bool = True):
+    def __init__(self, dataloader: DataLoader, name: str = "", softmax_model=None, write_csv: bool = True):
         """
         Constructs an evaluator for the given dataset
 
-        :param dataloader:
-            the data for the evaluation
+        Args:
+            dataloader (DataLoader): the data for the evaluation
         """
+        super().__init__()
         self.dataloader = dataloader
         self.name = name
         self.softmax_model = softmax_model
-
         self.write_csv = write_csv
-        self.csv_file: str = (name if name else "validation") + "_results.csv"
+        self.csv_file = name + ".csv"
         self.csv_headers = ["epoch", "steps", "loss", "accuracy"]
+        self.primary_metric = "accuracy"
+        self.best_accuracy = 0.0
 
-    def __call__(self, model, output_path: str = None, epoch: int = -1, steps: int = -1) -> float:
+        if self.softmax_model:
+            self.softmax_model.set_evaluator(self)
+
+    def __call__(
+        self, model: "SentenceTransformer", output_path: str = None, epoch: int = -1, steps: int = -1
+    ) -> Dict[str, float]:
         model.eval()
-        total = 0
+        total_samples = 0
+        total_acc = 0
+        total_loss = 0.0
         correct = 0
-        loss = 0
 
         if epoch != -1:
             if steps == -1:
@@ -47,52 +61,54 @@ class LabelAccuracyEvaluator(SentenceEvaluator):
         else:
             out_txt = ":"
 
-        logger.info("Evaluation on the "+self.name+" dataset"+out_txt)
+        logger.info("Evaluation on the " + self.name + " dataset" + out_txt)
         self.dataloader.collate_fn = model.smart_batching_collate
-        self.softmax_model.to(model.device)
+
         for step, batch in enumerate(self.dataloader):
             features, label_ids = batch
             for idx in range(len(features)):
                 features[idx] = batch_to_device(features[idx], model.device)
             label_ids = label_ids.to(model.device)
             with torch.no_grad():
-                _, prediction = self.softmax_model(features, labels=None)
+                loss, accuracy = self.softmax_model(features, label_ids)
+                #_, output = self.softmax_model(features, labels=None)
 
-            loss += torch.nn.functional.cross_entropy(prediction, label_ids).item()
-            total += prediction.size(0)
-            predicted_ids = torch.argmax(prediction, dim=1)
-            correct += predicted_ids.eq(label_ids).sum().item()
+            batch_size = len(label_ids)
+            total_samples += batch_size
+            total_acc += accuracy * batch_size
+            total_loss += loss.item() * batch_size
 
-            # write predictions and labels to csv
-            if self.name == "test" and output_path is not None and self.write_csv:
-                csv_path = os.path.join(output_path, self.name + "_preds.csv")
-                if not os.path.isfile(csv_path):
-                    with open(csv_path, newline='', mode="w", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["prediction", "label"])
-                        for i in range(len(label_ids)):
-                            writer.writerow([predicted_ids[i].item(), label_ids[i].item()])
-                else:
-                    with open(csv_path, newline='', mode="a", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        for i in range(len(label_ids)):
-                            writer.writerow([predicted_ids[i].item(), label_ids[i].item()])
+        # avg_accuracy = correct / num_samples
+        avg_accuracy = total_acc / total_samples
+        avg_loss = total_loss / total_samples
 
-        epoch_accuracy = round(correct/total, 4)
-        epoch_loss = round(loss/total, 4)
+        print(f"{self.name} Loss  = {avg_loss:.4f}   {self.name} Accuracy  = {avg_accuracy:.4f}")
 
-        print("Valid Loss = {:.2f}   Valid Accuracy = {:.2f}".format(epoch_loss, epoch_accuracy*100))
+        # save state_dict
+        if self.name == "Zero" and output_path is not None:
+            softmax_model_dir = os.path.join(os.path.dirname(output_path), "softmax_model_checkpoints")
+            os.makedirs(softmax_model_dir, exist_ok=True)
+
+            # Save the model after each epoch
+            # torch.save(self.softmax_model.state_dict(), os.path.join(softmax_model_dir, f"epoch_{epoch}.pt"))
+
+            # Save the best softmax model considering the zero-shot accuracy
+            if avg_accuracy > self.best_accuracy:
+                torch.save(self.softmax_model.state_dict(), os.path.join(softmax_model_dir, "best.pt"))
+                self.best_accuracy = avg_accuracy
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
             if not os.path.isfile(csv_path):
-                with open(csv_path, newline='', mode="w", encoding="utf-8") as f:
+                with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, epoch_loss, epoch_accuracy])
-            else:
-                with open(csv_path, newline='', mode="a", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([epoch, steps, epoch_loss, epoch_accuracy])
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{avg_accuracy:.4f}"])
 
-        return epoch_accuracy
+            else:
+                with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{avg_accuracy:.4f}"])
+
+
+        return avg_accuracy

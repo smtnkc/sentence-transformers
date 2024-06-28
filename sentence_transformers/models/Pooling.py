@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from torch import nn
+import torch.nn.functional as F
 from typing import Union, Tuple, List, Iterable, Dict
 import os
 import json
@@ -26,6 +27,9 @@ class Pooling(nn.Module):
                  pooling_mode: str = None,
                  pooling_mode_cls_token: bool = False,
                  pooling_mode_max_tokens: bool = False,
+                 pooling_mode_global_max: bool = False,
+                 pooling_mode_global_avg: bool = False,
+                 pooling_mode_attention: bool = False,
                  pooling_mode_mean_tokens: bool = False,
                  pooling_mode_mean_sqrt_len_tokens: bool = False,
                  pooling_mode_weightedmean_tokens: bool = False,
@@ -34,13 +38,17 @@ class Pooling(nn.Module):
         super(Pooling, self).__init__()
 
         self.config_keys = ['word_embedding_dimension', 'pooling_mode_cls_token', 'pooling_mode_mean_tokens', 'pooling_mode_max_tokens',
+                            'pooling_mode_global_max', 'pooling_mode_global_avg', 'pooling_mode_attention',
                             'pooling_mode_mean_sqrt_len_tokens', 'pooling_mode_weightedmean_tokens', 'pooling_mode_lasttoken']
 
         if pooling_mode is not None:        #Set pooling mode by string
             pooling_mode = pooling_mode.lower()
-            assert pooling_mode in ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-            pooling_mode_cls_token = (pooling_mode == 'cls')
-            pooling_mode_max_tokens = (pooling_mode == 'max')
+            assert pooling_mode in ['mean', 'max', 'cls', 'weightedmean', 'lasttoken', 'max_cls', 'global_max', 'global_avg', 'attention']
+            pooling_mode_cls_token = (pooling_mode == 'cls' or pooling_mode == 'max_cls')
+            pooling_mode_max_tokens = (pooling_mode == 'max' or pooling_mode == 'max_cls')
+            pooling_mode_global_max = (pooling_mode == 'global_max')
+            pooling_mode_global_avg = (pooling_mode == 'global_avg')
+            pooling_mode_attention = (pooling_mode == 'attention')
             pooling_mode_mean_tokens = (pooling_mode == 'mean')
             pooling_mode_weightedmean_tokens = (pooling_mode == 'weightedmean')
             pooling_mode_lasttoken = (pooling_mode == 'lasttoken')
@@ -49,12 +57,19 @@ class Pooling(nn.Module):
         self.pooling_mode_cls_token = pooling_mode_cls_token
         self.pooling_mode_mean_tokens = pooling_mode_mean_tokens
         self.pooling_mode_max_tokens = pooling_mode_max_tokens
+        self.pooling_mode_global_max = pooling_mode_global_max
+        self.pooling_mode_global_avg = pooling_mode_global_avg
+        self.pooling_mode_attention = pooling_mode_attention
         self.pooling_mode_mean_sqrt_len_tokens = pooling_mode_mean_sqrt_len_tokens
         self.pooling_mode_weightedmean_tokens = pooling_mode_weightedmean_tokens
         self.pooling_mode_lasttoken = pooling_mode_lasttoken
 
-        pooling_mode_multiplier = sum([pooling_mode_cls_token, pooling_mode_max_tokens, pooling_mode_mean_tokens, 
-            pooling_mode_mean_sqrt_len_tokens, pooling_mode_weightedmean_tokens, pooling_mode_lasttoken])
+        if self.pooling_mode_attention:
+            self.attention_layer = nn.Linear(word_embedding_dimension, 1)
+
+        pooling_mode_multiplier = sum([pooling_mode_cls_token, pooling_mode_max_tokens, pooling_mode_mean_tokens,
+                                        pooling_mode_global_max, pooling_mode_global_avg, pooling_mode_attention,
+                                        pooling_mode_mean_sqrt_len_tokens, pooling_mode_weightedmean_tokens, pooling_mode_lasttoken])
         self.pooling_output_dimension = (pooling_mode_multiplier * word_embedding_dimension)
 
 
@@ -72,6 +87,12 @@ class Pooling(nn.Module):
             modes.append('mean')
         if self.pooling_mode_max_tokens:
             modes.append('max')
+        if self.pooling_mode_global_max:
+            modes.append('global_max')
+        if self.pooling_mode_global_avg:
+            modes.append('global_avg')
+        if self.pooling_mode_attention:
+            modes.append('attention')
         if self.pooling_mode_mean_sqrt_len_tokens:
             modes.append('mean_sqrt_len_tokens')
         if self.pooling_mode_weightedmean_tokens:
@@ -85,6 +106,13 @@ class Pooling(nn.Module):
         token_embeddings = features['token_embeddings']
         attention_mask = features['attention_mask']
 
+        device = token_embeddings.device
+
+        ## Move all relevant tensors to the same device
+        attention_mask = attention_mask.to(device)
+        if self.pooling_mode_attention:
+            self.attention_layer = self.attention_layer.to(device)
+
         ## Pooling strategy
         output_vectors = []
         if self.pooling_mode_cls_token:
@@ -95,6 +123,18 @@ class Pooling(nn.Module):
             token_embeddings[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
             max_over_time = torch.max(token_embeddings, 1)[0]
             output_vectors.append(max_over_time)
+        if self.pooling_mode_global_max:
+            global_max_pooling = torch.max(token_embeddings, dim=1)[0]
+            output_vectors.append(global_max_pooling)
+        if self.pooling_mode_global_avg:
+            global_avg_pooling = torch.mean(token_embeddings, dim=1)
+            output_vectors.append(global_avg_pooling)
+        if self.pooling_mode_attention:
+            attention_scores = self.attention_layer(token_embeddings).squeeze(-1)
+            attention_scores = attention_scores.masked_fill(attention_mask == 0, -1e9)  # Set attention scores of padding tokens to a large negative value
+            attention_weights = F.softmax(attention_scores, dim=1)
+            attention_output = torch.sum(token_embeddings * attention_weights.unsqueeze(-1), dim=1)
+            output_vectors.append(attention_output)
         if self.pooling_mode_mean_tokens or self.pooling_mode_mean_sqrt_len_tokens:
             input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
             sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)

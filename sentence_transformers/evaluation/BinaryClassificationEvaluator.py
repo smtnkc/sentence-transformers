@@ -2,13 +2,12 @@ from . import SentenceEvaluator
 import logging
 import os
 import csv
-from sklearn.metrics.pairwise import paired_cosine_distances, paired_euclidean_distances, paired_manhattan_distances
-from sklearn.metrics import average_precision_score
 import numpy as np
 from typing import List
 from ..readers import InputExample
 import torch
 import torch.nn.functional as F
+from sentence_transformers.util import SiameseDistanceMetric, get_best_distance_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +25,28 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
     :param sentences1: The first column of sentences
     :param sentences2: The second column of sentences
     :param labels: labels[i] is the label for the pair (sentences1[i], sentences2[i]). Must be 0 or 1
+    :param distance_metric: Metric to compute the distance between two embeddings. Default is Euclidean
     :param name: Name for the output
     :param batch_size: Batch size used to compute embeddings
+    :param margin: Margin to be used in the contrastive loss
     :param show_progress_bar: If true, prints a progress bar
     :param write_csv: Write results to a CSV file
     """
 
-    def __init__(self, sentences1: List[str], sentences2: List[str], labels: List[int], name: str = '', batch_size: int = 32, show_progress_bar: bool = False, write_csv: bool = True):
+    def __init__(self, sentences1: List[str],
+                 sentences2: List[str],
+                 labels: List[int],
+                 distance_metric: SiameseDistanceMetric = SiameseDistanceMetric.EUCLIDEAN,
+                 name: str = '',
+                 batch_size: int = 32,
+                 margin = None,
+                 show_progress_bar: bool = False,
+                 write_csv: bool = True):
         self.sentences1 = sentences1
         self.sentences2 = sentences2
         self.labels = labels
+        self.distance_metric = distance_metric
+        self.margin = margin
 
         assert len(self.sentences1) == len(self.sentences2)
         assert len(self.sentences1) == len(self.labels)
@@ -49,12 +60,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
             show_progress_bar = (logger.getEffectiveLevel() == logging.INFO or logger.getEffectiveLevel() == logging.DEBUG)
         self.show_progress_bar = show_progress_bar
 
-        self.csv_file: str = (name if name else "validation") + "_results.csv"
-        # self.csv_headers = ["epoch", "steps",
-        #                     "cossim_accuracy", "cossim_accuracy_threshold", "cossim_f1", "cossim_precision", "cossim_recall", "cossim_f1_threshold", "cossim_ap",
-        #                     "manhattan_accuracy", "manhattan_accuracy_threshold", "manhattan_f1", "manhattan_precision", "manhattan_recall", "manhattan_f1_threshold", "manhattan_ap",
-        #                     "euclidean_accuracy", "euclidean_accuracy_threshold", "euclidean_f1", "euclidean_precision", "euclidean_recall", "euclidean_f1_threshold", "euclidean_ap",
-        #                     "dot_accuracy", "dot_accuracy_threshold", "dot_f1", "dot_precision", "dot_recall", "dot_f1_threshold", "dot_ap"]
+        self.csv_file = name + ".csv"
         self.csv_headers = ["epoch", "steps", "loss", "accuracy"]
 
 
@@ -71,20 +77,10 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
         return cls(sentences1, sentences2, scores, **kwargs)
 
     def __call__(self, model, output_path: str = None, epoch: int = -1, steps: int = -1) -> float:
-
-        if epoch != -1:
-            if steps == -1:
-                out_txt = f" after epoch {epoch}:"
-            else:
-                out_txt = f" in epoch {epoch} after {steps} steps:"
-        else:
-            out_txt = ":"
-
-        logger.info("Binary Accuracy Evaluation of the model on " + self.name + " dataset" + out_txt)
-
         scores, preds_and_trues = self.compute_metrices(model)
-        min_loss = min(scores[short_name]['loss'] for short_name in scores)
-        max_acc = max(scores[short_name]['accuracy'] for short_name in scores)
+        loss = scores['loss']
+        acc = scores['accuracy']
+        median_threshold = scores['median_threshold']
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
@@ -92,14 +88,13 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
                 with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, min_loss, max_acc])
-
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}"])
             else:
                 with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, steps, min_loss, max_acc])
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}"])
 
-        return max_acc, preds_and_trues
+        return acc, preds_and_trues, median_threshold
 
 
     def compute_metrices(self, model):
@@ -109,131 +104,48 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
         embeddings1 = [emb_dict[sent] for sent in self.sentences1]
         embeddings2 = [emb_dict[sent] for sent in self.sentences2]
 
-        #cosine_scores = 1 - paired_cosine_distances(embeddings1, embeddings2)
-        #manhattan_distances = paired_manhattan_distances(embeddings1, embeddings2)
-        euclidean_distances = paired_euclidean_distances(embeddings1, embeddings2)
-
-        #embeddings1_np = np.asarray(embeddings1)
-        #embeddings2_np = np.asarray(embeddings2)
-        #dot_scores = [np.dot(embeddings1_np[i], embeddings2_np[i]) for i in range(len(embeddings1_np))]
-
+        distances = self.distance_metric(embeddings1, embeddings2)
 
         labels = np.asarray(self.labels)
         output_scores = {}
 
-        metric_options = [
-                #['manhattan', 'Manhattan-Distance', manhattan_distances, False],
-                #['cossim', 'Cosine-Similarity', cosine_scores, True],
-                ['euclidean', 'Euclidean-Distance', euclidean_distances, False]
-                #['dot', 'Dot-Product', dot_scores, True]
-             ]
-        for short_name, name, scores, reverse in metric_options:
-            acc, acc_threshold = self.find_best_acc_and_threshold(scores, labels, reverse)
-            f1, precision, recall, f1_threshold = self.find_best_f1_and_threshold(scores, labels, reverse)
-            #print(labels[:20])
-            #print(euclidean_distances.round(1)[:20])
-            #print((euclidean_distances < acc_threshold).astype(int)[:20])
-            #print((euclidean_distances < f1_threshold).astype(int)[:20])
-            ap = average_precision_score(labels, scores * (1 if reverse else -1))
+        # calculate accuracy using best threshold
+        best_distance_threshold = get_best_distance_threshold(distances, labels)
+        predictions = [1 if distance < best_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_best = correct_predictions / len(labels)
 
-            logger.info("Accuracy with {}:           {:.2f}\t(Threshold: {:.4f})".format(name, acc * 100, acc_threshold))
-            logger.info("F1 with {}:                 {:.2f}\t(Threshold: {:.4f})".format(name, f1 * 100, f1_threshold))
-            logger.info("Precision with {}:          {:.2f}".format(name, precision * 100))
-            logger.info("Recall with {}:             {:.2f}".format(name, recall * 100))
-            logger.info("Average Precision with {}:  {:.2f}\n".format(name, ap * 100))
+        # calculate accuracy using median threshold
+        if torch.is_tensor(distances) and distances.is_cuda:
+            distances = distances.detach().cpu().numpy()
+        median_distance_threshold = np.median(distances)
+        predictions = [1 if distance < median_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_median = correct_predictions / len(labels)
 
-            margin = 5.0
-            # convert labels and scores to torch tensors
-            t_labels = torch.tensor(labels)
-            t_scores = torch.tensor(scores)
-            valid_losses = 0.5 * (t_labels.float() * t_scores.pow(2) + (1 - t_labels).float() * F.relu(margin - t_scores).pow(2))
+        # convert labels and scores to torch tensors
+        t_labels = torch.tensor(labels)
+        t_scores = torch.tensor(distances)
+        valid_losses = 0.5 * (t_labels.float() * t_scores.pow(2) + (1 - t_labels).float() * F.relu(self.margin - t_scores).pow(2))
 
-            preds_and_trues = []
-            for i in range(len(t_labels)):
-                pred = 1 if t_scores[i] < acc_threshold else 0
-                preds_and_trues.append((pred, t_labels[i].item()))
+        preds_and_trues = []
+        for i in range(len(t_labels)):
+            pred = 1 if t_scores[i] < best_distance_threshold else 0
+            preds_and_trues.append((pred, t_labels[i].item()))
 
-            print("Valid Loss = {:.2f}   Valid Accuracy = {:.2f}".format(valid_losses.mean(), acc * 100))
+        print(f"{self.name} Loss  = {valid_losses.mean():.4f}   "
+            f"{self.name} Accuracy  = {acc_by_best:.4f}    "
+            f"(using best distance threshold   = {best_distance_threshold:.4f})")
 
+        print(f"{self.name} Loss  = {valid_losses.mean():.4f}   "
+            f"{self.name} Accuracy  = {acc_by_median:.4f}    "
+            f"(using median distance threshold = {median_distance_threshold:.4f})")
 
-
-            output_scores[short_name] = {
-                'loss': valid_losses.mean().item(),
-                'accuracy' : acc,
-                'accuracy_threshold': acc_threshold,
-                'f1': f1,
-                'f1_threshold': f1_threshold,
-                'precision': precision,
-                'recall': recall,
-                'ap': ap
-            }
-
+        output_scores = {
+            'loss': valid_losses.mean().item(),
+            'accuracy' : acc_by_best,
+            'best_threshold': best_distance_threshold,
+            'median_threshold': median_distance_threshold
+        }
 
         return output_scores, preds_and_trues
-
-
-
-    @staticmethod
-    def find_best_acc_and_threshold(scores, labels, high_score_more_similar: bool):
-        assert len(scores) == len(labels)
-        rows = list(zip(scores, labels))
-
-        rows = sorted(rows, key=lambda x: x[0], reverse=high_score_more_similar)
-
-        max_acc = 0
-        best_threshold = -1
-
-        positive_so_far = 0
-        remaining_negatives = sum(labels == 0)
-
-        for i in range(len(rows)-1):
-            score, label = rows[i]
-            if label == 1:
-                positive_so_far += 1
-            else:
-                remaining_negatives -= 1
-
-            acc = (positive_so_far + remaining_negatives) / len(labels)
-            if acc > max_acc:
-                max_acc = acc
-                best_threshold = (rows[i][0] + rows[i+1][0]) / 2
-
-        print("Threshold for highest accuracy = {:.4f}".format(best_threshold))
-        return max_acc, best_threshold
-
-    @staticmethod
-    def find_best_f1_and_threshold(scores, labels, high_score_more_similar: bool):
-        assert len(scores) == len(labels)
-
-        scores = np.asarray(scores)
-        labels = np.asarray(labels)
-
-        rows = list(zip(scores, labels))
-
-        rows = sorted(rows, key=lambda x: x[0], reverse=high_score_more_similar)
-
-        best_f1 = best_precision = best_recall = 0
-        threshold = 0
-        nextract = 0
-        ncorrect = 0
-        total_num_duplicates = sum(labels)
-
-        for i in range(len(rows)-1):
-            score, label = rows[i]
-            nextract += 1
-
-            if label == 1:
-                ncorrect += 1
-
-            if ncorrect > 0:
-                precision = ncorrect / nextract
-                recall = ncorrect / total_num_duplicates
-                f1 = 2 * precision * recall / (precision + recall)
-                if f1 > best_f1:
-                    best_f1 = f1
-                    best_precision = precision
-                    best_recall = recall
-                    threshold = (rows[i][0] + rows[i + 1][0]) / 2
-
-        return best_f1, best_precision, best_recall, threshold
-

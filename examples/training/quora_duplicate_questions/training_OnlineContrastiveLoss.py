@@ -35,7 +35,7 @@ num_epochs = 10
 train_batch_size = 64
 
 #As distance metric, we use cosine distance (cosine_distance = 1-cosine_similarity)
-distance_metric = losses.SiameseDistanceMetric.COSINE_DISTANCE
+distance_metric = losses.SiameseDistanceMetric.COSINE
 
 #Negative pairs should have a distance of at least 0.5
 margin = 0.5

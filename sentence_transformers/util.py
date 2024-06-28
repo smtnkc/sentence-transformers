@@ -5,13 +5,15 @@ from tqdm.autonotebook import tqdm
 import sys
 import importlib
 import os
+from enum import Enum
 import torch
 import numpy as np
 import queue
 import logging
 from typing import Dict, Optional, Union
 from pathlib import Path
-
+import torch.nn.functional as F
+from sklearn.metrics.pairwise import paired_cosine_distances, paired_euclidean_distances, paired_manhattan_distances
 import huggingface_hub
 from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
 from huggingface_hub import HfApi, hf_hub_url, cached_download, HfFolder
@@ -20,6 +22,61 @@ from packaging import version
 import heapq
 
 logger = logging.getLogger(__name__)
+
+
+class SiameseDistanceMetric(Enum):
+    """
+    Enum for distance metrics used in contrastive loss.
+    Uses PyTorch operations if inputs are tensors,
+    otherwise uses sklearn functions for lists or arrays.
+    """
+    
+    # Euclidean distance
+    EUCLIDEAN = (
+        lambda x, y: F.pairwise_distance(x, y, p=2)
+        if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor)
+        else paired_euclidean_distances(x, y)
+    )
+    
+    # Manhattan distance
+    MANHATTAN = (
+        lambda x, y: F.pairwise_distance(x, y, p=1)
+        if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor)
+        else paired_manhattan_distances(x, y)
+    )
+    
+    # Cosine distance
+    COSINE = (
+        lambda x, y: 1 - F.cosine_similarity(x, y)
+        if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor)
+        else paired_cosine_distances(x, y)
+    )
+
+def get_best_distance_threshold(scores, labels):
+    assert len(scores) == len(labels)
+    rows = list(zip(scores, labels))
+
+    rows = sorted(rows, key=lambda x: x[0])
+
+    max_acc = 0
+    best_threshold = -1
+
+    positive_so_far = 0
+    remaining_negatives = sum(labels == 0)
+
+    for i in range(len(rows)-1):
+        score, label = rows[i]
+        if label == 1:
+            positive_so_far += 1
+        else:
+            remaining_negatives -= 1
+
+        acc = (positive_so_far + remaining_negatives) / len(labels)
+        if acc > max_acc:
+            max_acc = acc
+            best_threshold = (rows[i][0] + rows[i+1][0]) / 2
+
+    return best_threshold
 
 def pytorch_cos_sim(a: Tensor, b: Tensor):
     """

@@ -1,19 +1,10 @@
-from enum import Enum
 from typing import Iterable, Dict
+import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 import numpy as np
 from sentence_transformers.SentenceTransformer import SentenceTransformer
-
-
-class SiameseDistanceMetric(Enum):
-    """
-    The metric for the contrastive loss
-    """
-    EUCLIDEAN = lambda x, y: F.pairwise_distance(x, y, p=2)
-    MANHATTAN = lambda x, y: F.pairwise_distance(x, y, p=1)
-    COSINE_DISTANCE = lambda x, y: 1-F.cosine_similarity(x, y)
-
+from sentence_transformers.util import SiameseDistanceMetric, get_best_distance_threshold
 
 class ContrastiveLoss(nn.Module):
     """
@@ -44,7 +35,10 @@ class ContrastiveLoss(nn.Module):
 
     """
 
-    def __init__(self, model: SentenceTransformer, distance_metric=SiameseDistanceMetric.EUCLIDEAN, margin: float = 0.5, size_average:bool = True):
+    def __init__(self, model: SentenceTransformer,
+                 distance_metric=SiameseDistanceMetric.EUCLIDEAN,
+                 margin: float = None,
+                 size_average: bool = True):
         super(ContrastiveLoss, self).__init__()
         self.distance_metric = distance_metric
         self.margin = margin
@@ -58,47 +52,37 @@ class ContrastiveLoss(nn.Module):
                 distance_metric_name = "SiameseDistanceMetric.{}".format(name)
                 break
 
-        return {'distance_metric': distance_metric_name, 'margin': self.margin, 'size_average': self.size_average}
+        return {'distance_metric': distance_metric_name,
+                'margin': self.margin,
+                'size_average': self.size_average}
 
     def forward(self, sentence_features: Iterable[Dict[str, Tensor]], labels: Tensor):
         reps = [self.model(sentence_feature)['sentence_embedding'] for sentence_feature in sentence_features]
         assert len(reps) == 2
         rep_anchor, rep_other = reps
+
         distances = self.distance_metric(rep_anchor, rep_other)
+        # positive_pairs = distances[labels == 1]
+        # negative_pairs = distances[labels == 0]
+
+        # positive_loss = positive_pairs.pow(2).sum()
+        # negative_loss = F.relu(self.margin - negative_pairs).pow(2).sum()
+        # losses = positive_loss + negative_loss
+
         losses = 0.5 * (labels.float() * distances.pow(2) + (1 - labels).float() * F.relu(self.margin - distances).pow(2))
-        high_score_more_similar = True if self.distance_metric == SiameseDistanceMetric.COSINE_DISTANCE else False
-        acc, acc_threshold = self.find_best_acc_and_threshold(distances, labels, high_score_more_similar=high_score_more_similar)
-        return (losses.mean(), acc.item()) if self.size_average else (losses.sum(), acc.item())
 
+        # calculate accuracy using best threshold
+        best_distance_threshold = get_best_distance_threshold(distances, labels)
+        predictions = [1 if distance < best_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_best = correct_predictions / len(labels)
 
-    @staticmethod
-    def find_best_acc_and_threshold(scores, labels, high_score_more_similar: bool):
-        assert len(scores) == len(labels)
-        rows = list(zip(scores, labels))
+        # calculate accuracy using median threshold
+        if torch.is_tensor(distances) and distances.is_cuda:
+            distances = distances.detach().cpu().numpy()
+        median_distance_threshold = np.median(distances)
+        predictions = [1 if distance < median_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_median = correct_predictions / len(labels)
 
-        rows = sorted(rows, key=lambda x: x[0], reverse=high_score_more_similar)
-
-        max_acc = 0
-        best_threshold = -1
-
-        positive_so_far = 0
-        remaining_negatives = sum(labels == 0)
-
-        for i in range(len(rows)-1):
-            score, label = rows[i]
-            if label == 1:
-                positive_so_far += 1
-            else:
-                remaining_negatives -= 1
-
-            acc = (positive_so_far + remaining_negatives) / len(labels)
-            if acc > max_acc:
-                max_acc = acc
-                best_threshold = (rows[i][0] + rows[i+1][0]) / 2
-
-        return max_acc, best_threshold
-
-
-
-
-
+        return (losses.mean(), acc_by_best.item()) if self.size_average else (losses.sum(), acc_by_best.item())

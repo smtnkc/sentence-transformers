@@ -1,8 +1,10 @@
 from typing import Iterable, Dict
+import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
-from .ContrastiveLoss import SiameseDistanceMetric
+import numpy as np
 from sentence_transformers.SentenceTransformer import SentenceTransformer
+from sentence_transformers.util import SiameseDistanceMetric, get_best_distance_threshold
 
 
 class OnlineContrastiveLoss(nn.Module):
@@ -32,18 +34,35 @@ class OnlineContrastiveLoss(nn.Module):
         model.fit([(train_dataloader, train_loss)], show_progress_bar=True)
     """
 
-    def __init__(self, model: SentenceTransformer, distance_metric=SiameseDistanceMetric.COSINE_DISTANCE, margin: float = 0.5):
+    def __init__(self, model: SentenceTransformer,
+                 distance_metric=SiameseDistanceMetric.EUCLIDEAN,
+                 margin: float = None,
+                 size_average: bool = True):
         super(OnlineContrastiveLoss, self).__init__()
-        self.model = model
-        self.margin = margin
         self.distance_metric = distance_metric
+        self.margin = margin
+        self.model = model
+        self.size_average = size_average
 
-    def forward(self, sentence_features: Iterable[Dict[str, Tensor]], labels: Tensor, size_average=False):
-        embeddings = [self.model(sentence_feature)['sentence_embedding'] for sentence_feature in sentence_features]
+    def get_config_dict(self):
+        distance_metric_name = self.distance_metric.__name__
+        for name, value in vars(SiameseDistanceMetric).items():
+            if value == self.distance_metric:
+                distance_metric_name = "SiameseDistanceMetric.{}".format(name)
+                break
 
-        distance_matrix = self.distance_metric(embeddings[0], embeddings[1])
-        negs = distance_matrix[labels == 0]
-        poss = distance_matrix[labels == 1]
+        return {'distance_metric': distance_metric_name,
+                'margin': self.margin,
+                'size_average': self.size_average}
+
+    def forward(self, sentence_features: Iterable[Dict[str, Tensor]], labels: Tensor):
+        reps = [self.model(sentence_feature)['sentence_embedding'] for sentence_feature in sentence_features]
+        assert len(reps) == 2
+        rep_anchor, rep_other = reps
+
+        distances = self.distance_metric(rep_anchor, rep_other)
+        negs = distances[labels == 0]
+        poss = distances[labels == 1]
 
         # select hard positive and hard negative pairs
         negative_pairs = negs[negs < (poss.max() if len(poss) > 1 else negs.mean())]
@@ -51,5 +70,20 @@ class OnlineContrastiveLoss(nn.Module):
 
         positive_loss = positive_pairs.pow(2).sum()
         negative_loss = F.relu(self.margin - negative_pairs).pow(2).sum()
-        loss = positive_loss + negative_loss
-        return loss
+        losses = 0.5 * (positive_loss + negative_loss)
+
+        # calculate accuracy using best threshold
+        best_distance_threshold = get_best_distance_threshold(distances, labels)
+        predictions = [1 if distance < best_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_best = correct_predictions / len(labels)
+
+        # calculate accuracy using median threshold
+        if torch.is_tensor(distances) and distances.is_cuda:
+            distances = distances.detach().cpu().numpy()
+        median_distance_threshold = np.median(distances)
+        predictions = [1 if distance < median_distance_threshold else 0 for distance in distances]
+        correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
+        acc_by_median = correct_predictions / len(labels)
+
+        return (losses.mean(), acc_by_best.item()) if self.size_average else (losses.sum(), acc_by_best.item())
