@@ -580,6 +580,7 @@ class SentenceTransformer(nn.Sequential):
             zero_shot_tester: SentenceEvaluator = None,
             epochs: int = 1,
             steps_per_epoch = None,
+            early_stopping = True,
             scheduler: str = 'WarmupLinear',
             warmup_steps: int = 10000,
             optimizer_class: Type[Optimizer] = torch.optim.AdamW,
@@ -792,15 +793,17 @@ class SentenceTransformer(nn.Sequential):
                         writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}"])
 
             eval_out = self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback, name="Eval")
-            _ = self._eval_during_training(tester, output_path, save_best_model, epoch, training_steps, callback, name="Test")
-            _ = self._eval_during_training(zero_shot_tester, output_path, save_best_model, epoch, training_steps, callback, name="Zero")
+            if tester is not None:
+                _ = self._eval_during_training(tester, output_path, save_best_model, epoch, training_steps, callback, name="Test")
+            if zero_shot_tester is not None:
+                _ = self._eval_during_training(zero_shot_tester, output_path, save_best_model, epoch, training_steps, callback, name="Zero")
 
-            if isinstance(eval_out, tuple) and len(eval_out) > 2:
-                median_distance_threshold = eval_out[2]
-                if median_distance_threshold < 1e-4:
-                    print("Early stopping training as median_distance_threshold is below 1e-4")
-                    break
-            if accuracy < 1e-4:
+            #if isinstance(eval_out, tuple) and len(eval_out) > 2:
+                #median_distance_threshold = eval_out[2]
+                #if early_stopping and median_distance_threshold < 1e-4:
+                    #print("Early stopping training as median_distance_threshold is below 1e-4")
+                    #break
+            if early_stopping and accuracy < 1e-4:
                 print("Early stopping training as train_accuracy is below 1e-4")
                 break
 
@@ -843,6 +846,12 @@ class SentenceTransformer(nn.Sequential):
             if callback is not None:
                 callback(score, epoch, steps)
             if name == "Eval":
+                # Save the checkpoint in each evaluation
+                checkpoint_model_path = os.path.join(output_path, "checkpoints", "checkpoint-{}".format(epoch))
+                if not os.path.exists(checkpoint_model_path):
+                    os.makedirs(checkpoint_model_path)
+                self.save(checkpoint_model_path)
+                # Also save the best model
                 if score > self.best_score:
                     self.best_score = score
                     if save_best_model:
