@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 import numpy as np
+from sklearn.metrics import roc_auc_score
 from sentence_transformers.SentenceTransformer import SentenceTransformer
 from sentence_transformers.util import SiameseDistanceMetric, get_best_distance_threshold
 
@@ -85,4 +86,9 @@ class ContrastiveLoss(nn.Module):
         correct_predictions = sum(pred == label for pred, label in zip(predictions, labels))
         acc_by_median = correct_predictions / len(labels)
 
-        return (losses.mean(), acc_by_best.item()) if self.size_average else (losses.sum(), acc_by_best.item())
+        # move to labels cpu
+        labels = labels.detach().cpu().numpy()
+        # calculate AUC
+        AUC = roc_auc_score(labels, -np.array(distances))
+
+        return (losses.mean(), acc_by_best.item(), AUC) if self.size_average else (losses.sum(), acc_by_best.item(), AUC)

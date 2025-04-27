@@ -8,6 +8,7 @@ from ..readers import InputExample
 import torch
 import torch.nn.functional as F
 from sentence_transformers.util import SiameseDistanceMetric, get_best_distance_threshold
+from sklearn.metrics import roc_auc_score, roc_curve
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
         self.show_progress_bar = show_progress_bar
 
         self.csv_file = name + ".csv"
-        self.csv_headers = ["epoch", "steps", "loss", "accuracy"]
+        self.csv_headers = ["epoch", "steps", "loss", "accuracy", "auc", "fpr", "tpr", "thresholds"]
 
 
     @classmethod
@@ -80,6 +81,11 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
         scores, preds_and_trues = self.compute_metrices(model)
         loss = scores['loss']
         acc = scores['accuracy']
+        auc = scores['auc']
+        fpr = scores['fpr']
+        tpr = scores['tpr']
+        thresholds = scores['thresholds']
+    
         median_threshold = scores['median_threshold']
 
         if output_path is not None and self.write_csv:
@@ -88,11 +94,13 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
                 with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}"])
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}", f"{auc:.4f}",
+                                     f"{fpr.tolist()}", f"{tpr.tolist()}", f"{thresholds.tolist()}"])
             else:
                 with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}"])
+                    writer.writerow([epoch, steps, f"{loss:.4f}", f"{acc:.4f}", f"{auc:.4f}",
+                                     f"{fpr.tolist()}", f"{tpr.tolist()}", f"{thresholds.tolist()}"])
 
         return acc, preds_and_trues, median_threshold
 
@@ -133,17 +141,27 @@ class BinaryClassificationEvaluator(SentenceEvaluator):
             pred = 1 if t_scores[i] < best_distance_threshold else 0
             preds_and_trues.append((pred, t_labels[i].item()))
 
-        print(f"{self.name} Loss  = {valid_losses.mean():.4f}   "
-            f"{self.name} Accuracy  = {acc_by_best:.4f}    "
-            f"(using best distance threshold   = {best_distance_threshold:.4f})")
+        # Caculate AUC
+        fpr, tpr, thresholds = roc_curve(labels, -np.array(distances))
+        AUC = roc_auc_score(labels, -np.array(distances))
 
         print(f"{self.name} Loss  = {valid_losses.mean():.4f}   "
-            f"{self.name} Accuracy  = {acc_by_median:.4f}    "
-            f"(using median distance threshold = {median_distance_threshold:.4f})")
+            f"{self.name} Accuracy  = {acc_by_best:.4f}    "
+            f"{self.name} AUC  = {AUC:.4f}    "
+            f"(using best distance threshold   = {best_distance_threshold:.4f})")
+
+        # print(f"{self.name} Loss  = {valid_losses.mean():.4f}   "
+        #     f"{self.name} Accuracy  = {acc_by_median:.4f}    "
+        #     f"{self.name} AUC  = {AUC:.4f}    "
+        #     f"(using median distance threshold = {median_distance_threshold:.4f})")
 
         output_scores = {
             'loss': valid_losses.mean().item(),
             'accuracy' : acc_by_best,
+            'fpr': fpr,
+            'tpr': tpr,
+            'thresholds': thresholds,
+            'auc': AUC,
             'best_threshold': best_distance_threshold,
             'median_threshold': median_distance_threshold
         }

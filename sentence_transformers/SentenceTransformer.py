@@ -700,7 +700,7 @@ class SentenceTransformer(nn.Sequential):
 
         num_train_objectives = len(train_objectives)
         self.csv_file: str = "Train.csv"
-        self.csv_headers = ["epoch",  "steps", "loss", "accuracy"]
+        self.csv_headers = ["epoch",  "steps", "loss", "accuracy", "auc"]
         skip_scheduler = False
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
             training_steps = 0
@@ -734,7 +734,7 @@ class SentenceTransformer(nn.Sequential):
 
                         if use_amp:
                             with autocast():
-                                loss_value, accuracy = loss_model(features, labels)
+                                loss_value, accuracy, AUC = loss_model(features, labels)
 
                             scale_before_step = scaler.get_scale()
                             scaler.scale(loss_value).backward()
@@ -745,7 +745,7 @@ class SentenceTransformer(nn.Sequential):
 
                             skip_scheduler = scaler.get_scale() != scale_before_step
                         else:
-                            loss_value, accuracy = loss_model(features, labels)
+                            loss_value, accuracy, AUC = loss_model(features, labels)
                             loss_value.backward()
                             torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
                             optimizer.step()
@@ -776,7 +776,7 @@ class SentenceTransformer(nn.Sequential):
             #epoch_loss = total_loss_value / training_steps
             #epoch_accuracy = total_accuracy / training_steps
             print("--- Epoch {} ---".format(epoch))
-            print(f"Train Loss = {loss_value.item():.4f}   Train Accuracy = {accuracy:.4f}")
+            print(f"Train Loss = {loss_value.item():.4f}   Train Accuracy = {accuracy:.4f}    Train AUC = {AUC:.4f}" )
 
             # write loss value to csv file
             if output_path is not None:
@@ -785,12 +785,12 @@ class SentenceTransformer(nn.Sequential):
                     with open(csv_path, newline="", mode="w", encoding="utf-8") as f:
                         writer = csv.writer(f)
                         writer.writerow(self.csv_headers)
-                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}"])
+                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}", f"{AUC:.4f}"])
 
                 else:
                     with open(csv_path, newline="", mode="a", encoding="utf-8") as f:
                         writer = csv.writer(f)
-                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}"])
+                        writer.writerow([epoch, training_steps, f"{loss_value.item():.4f}", f"{accuracy:.4f}", f"{AUC:.4f}"])
 
             eval_out = self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback, name="Eval")
             if tester is not None:
